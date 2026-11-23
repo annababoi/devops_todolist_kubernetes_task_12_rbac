@@ -9,8 +9,7 @@ kubectl apply -f .infrastructure/mysql/service.yml
 kubectl apply -f .infrastructure/mysql/statefulSet.yml
 
 # Wait for MySQL
-kubectl rollout status statefulset/mysql \
-  -n mysql --timeout=300s
+kubectl rollout status statefulset/mysql -n mysql --timeout=300s
 
 # Create application namespace
 kubectl apply -f .infrastructure/app/ns.yml
