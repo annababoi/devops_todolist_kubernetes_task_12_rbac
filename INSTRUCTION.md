@@ -2,54 +2,50 @@
 
 ## Prerequisites
 
-Install Docker Desktop, `kind`, `kubectl`, and `curl`. Run commands from the repository root. The examples use a kind cluster named `practice` and a Django application in the `todoapp` namespace.
+Install Docker Desktop, `kind`, and `kubectl`. Run all commands from the repository root. The example uses a kind cluster named `practice` and the Django application in the `todoapp` namespace. Docker Desktop must be running.
 
-**Security note:** Listing Secrets is a deliberately privileged operation for this educational exercise. Use a dedicated ServiceAccount and a namespace-scoped Role. Do not paste ServiceAccount tokens, Secret values, or decoded credentials into a Pull Request.
+**Security note:** Listing Kubernetes Secrets is a privileged operation used here for training. The dedicated ServiceAccount is granted only the `list` permission within the `todoapp` namespace. Do not expose ServiceAccount tokens, Secret `data`, passwords, or other credentials in screenshots or Pull Requests.
 
 ## 1. Create or select the Kubernetes cluster
 
-If the `practice` cluster does not already exist, create it using the repository's configuration:
+If the cluster does not exist, create it using the repository configuration:
 
 ```bash
+kind get clusters
 kind create cluster --name practice --config cluster.yml
 ```
 
-If a `practice` cluster already exists, skip creation. Select it and check the nodes:
+Skip `kind create cluster` if `practice` already exists. Select the correct context and check the nodes:
 
 ```bash
 kubectl config use-context kind-practice
 kubectl get nodes
 ```
 
-All nodes should eventually report `Ready`. If a different cluster name is used, select the corresponding `kind-<cluster-name>` context.
+All nodes should become `Ready`. If a different cluster name is used, select its corresponding `kind-<cluster-name>` context instead.
 
 ## 2. Deploy the application and RBAC resources
 
-The repository's `bootstrap.sh` deploys MySQL, applies the `todoapp` namespace, creates RBAC resources from `security/rbac.yml` **before** creating the Django Deployment, and then deploys the Django application.
+The `bootstrap.sh` script deploys MySQL, creates the `todoapp` namespace, applies `security/rbac.yml` **before** deploying Django, and then waits for the workloads to become ready.
 
 ```bash
 bash bootstrap.sh
-```
-
-Wait for the workload to become ready:
-
-```bash
 kubectl get pods -n mysql -o wide
 kubectl get pods -n todoapp -o wide
 kubectl rollout status deployment/todoapp -n todoapp --timeout=300s
 ```
 
-The ToDo application Pod should become `1/1 Running`. MySQL must be ready for Django's readiness endpoint to succeed.
+The Django Pod should become `1/1 Running`. MySQL needs to be ready for the application's readiness checks to succeed.
 
 ## 3. Verify ServiceAccount, Role, and RoleBinding
 
-The `security/rbac.yml` manifest contains three resources in the `todoapp` namespace:
+The `security/rbac.yml` manifest defines these resources in the `todoapp` namespace:
 
 - `ServiceAccount` named `secrets-lister`.
-- `Role` named `secrets-lister`, granting the `list` verb for the core API resource `secrets`.
-- `RoleBinding` named `secrets-lister-binding`, linking that Role to the ServiceAccount.
+- `Role` named `secrets-lister`, allowing the `list` verb on the core API resource `secrets`.
+- `RoleBinding` named `secrets-lister-binding`, assigning that Role to the ServiceAccount.
 
-Check that Kubernetes created them:
+Inspect the resources:
 
 ```bash
 kubectl get serviceaccount secrets-lister -n todoapp
@@ -59,47 +55,37 @@ kubectl describe role secrets-lister -n todoapp
 kubectl describe rolebinding secrets-lister-binding -n todoapp
 ```
 
-Verify the effective permissions:
+Check the effective permissions:
 
 ```bash
-kubectl auth can-i list secrets -n todoapp \
-  --as=system:serviceaccount:todoapp:secrets-lister
-
-kubectl auth can-i delete secrets -n todoapp \
-  --as=system:serviceaccount:todoapp:secrets-lister
+kubectl auth can-i list secrets -n todoapp --as=system:serviceaccount:todoapp:secrets-lister
+kubectl auth can-i delete secrets -n todoapp --as=system:serviceaccount:todoapp:secrets-lister
 ```
 
-Expected results: **`yes`** for `list` and **`no`** for `delete`, assuming no additional permission grants exist.
+Expected results are `yes` for `list` and `no` for `delete`, provided no other bindings grant additional permissions.
 
 ## 4. Verify that the Deployment uses the ServiceAccount
 
-The Django Deployment must include `serviceAccountName: secrets-lister` under `spec.template.spec`.
+The Django Deployment must specify `serviceAccountName: secrets-lister` in `spec.template.spec`.
 
 ```bash
-kubectl get deployment todoapp -n todoapp \
-  -o jsonpath='{.spec.template.spec.serviceAccountName}{"\n"}'
-
-kubectl get pods -n todoapp \
-  -o custom-columns=NAME:.metadata.name,SERVICEACCOUNT:.spec.serviceAccountName
+kubectl get deployment todoapp -n todoapp -o jsonpath='{.spec.template.spec.serviceAccountName}{"\n"}'
+kubectl get pods -n todoapp -o custom-columns=NAME:.metadata.name,SERVICEACCOUNT:.spec.serviceAccountName
 ```
 
-Both commands should identify `secrets-lister` for the Django workload.
+Both checks should identify `secrets-lister`.
 
-## 5. List Secrets from inside the Django Pod using curl
+## 5. List Secrets from inside a Django Pod with curl
 
-The following command runs **inside** a Pod selected by the Django Deployment. It authenticates to the Kubernetes API server using the Pod's mounted ServiceAccount token and cluster CA certificate. It prints the HTTP status and **only the names** of returned Secrets, without exposing their values.
+Run this command **from your local terminal**. The request itself runs inside the Django Pod, using its mounted ServiceAccount token and Kubernetes CA certificate. The output includes the HTTP status and Secret names only, not their values.
 
 ```bash
 kubectl exec -n todoapp deployment/todoapp -- sh -c '
-  SA=/var/run/secrets/kubernetes.io/serviceaccount
-  TOKEN=$(cat "$SA/token")
-  curl -sS --cacert "$SA/ca.crt" \
-    -H "Authorization: Bearer $TOKEN" \
-    -o /tmp/rbac-secrets-response.json \
-    -w "HTTP status: %{http_code}\n" \
-    https://kubernetes.default.svc/api/v1/namespaces/todoapp/secrets
-  python -c "import json; data=json.load(open(\"/tmp/rbac-secrets-response.json\")); print(\"Secret names:\", [item[\"metadata\"][\"name\"] for item in data.get(\"items\", [])])"
-  rm -f /tmp/rbac-secrets-response.json
+SA=/var/run/secrets/kubernetes.io/serviceaccount
+TOKEN=$(cat "$SA/token")
+curl -sS --cacert "$SA/ca.crt" -H "Authorization: Bearer $TOKEN" -o /tmp/rbac-secrets-response.json -w "HTTP status: %{http_code}\n" https://kubernetes.default.svc/api/v1/namespaces/todoapp/secrets
+python -c "import json; print(\"Secret names:\", [item[\"metadata\"][\"name\"] for item in json.load(open(\"/tmp/rbac-secrets-response.json\")).get(\"items\", [])])"
+rm -f /tmp/rbac-secrets-response.json
 '
 ```
 
@@ -110,22 +96,21 @@ HTTP status: 200
 Secret names: ['app-secret']
 ```
 
-The list of names may differ; `HTTP status: 200` and the returned list are the relevant evidence. This command assumes the Django image includes `curl` and Python. If `curl` is unavailable inside the image, install or use an appropriate curl-capable test container with the same ServiceAccount, and document that difference.
+Names depend on the resources created in the namespace. `HTTP status: 200` confirms a successful request. The command assumes the Django image includes `curl` and Python.
 
-**Screenshot for the PR:** Capture the terminal showing the in-Pod `kubectl exec ... curl` command and its successful output. Ensure no token, password, Secret `data`, or other sensitive values are visible. Attach the screenshot to the Pull Request.
+**Pull Request screenshot:** Capture the terminal with the in-Pod `curl` command and its successful response. The screenshot must not expose the token, Secret values, decoded credentials, or response `data` fields. Attach the screenshot to the PR.
 
 ## 6. Troubleshooting
 
-If the API returns `403 Forbidden`, verify that the ServiceAccount, Role, and RoleBinding are all in `todoapp`, that the Role specifies `resources: ["secrets"]` and `verbs: ["list"]`, and that `RoleBinding.subjects` refers to `secrets-lister`.
+If the API responds with `403 Forbidden`, confirm that the three RBAC resources use namespace `todoapp`, the Role contains `resources: ["secrets"]` and `verbs: ["list"]`, and the RoleBinding refers to `secrets-lister`:
 
 ```bash
 kubectl describe role secrets-lister -n todoapp
 kubectl describe rolebinding secrets-lister-binding -n todoapp
-kubectl auth can-i list secrets -n todoapp \
-  --as=system:serviceaccount:todoapp:secrets-lister
+kubectl auth can-i list secrets -n todoapp --as=system:serviceaccount:todoapp:secrets-lister
 ```
 
-If the Pod fails to start, inspect the Pod events and confirm that its ServiceAccount exists:
+If the Pod cannot start or is not ready, inspect its events, ServiceAccount, and logs:
 
 ```bash
 kubectl get pods -n todoapp
@@ -134,19 +119,17 @@ kubectl get serviceaccounts -n todoapp
 kubectl logs -n todoapp deployment/todoapp --tail=50
 ```
 
-If `kubectl` reports `localhost:8080 connection refused`, confirm that the kind cluster exists and select its context with `kubectl config use-context kind-practice`.
+If `kubectl` reports `localhost:8080 connection refused`, check that the kind cluster exists and switch to the correct context:
+
+```bash
+kind get clusters
+kubectl config use-context kind-practice
+kubectl get nodes
+```
 
 ## 7. Submission
 
-Make sure the Pull Request includes:
-
-- `security/rbac.yml` with the ServiceAccount, Role, and RoleBinding.
-- The updated Django Deployment manifest referencing `secrets-lister`.
-- The updated `bootstrap.sh`, applying RBAC before the Django Deployment.
-- This `INSTRUCTION.md`.
-- A screenshot of the successful in-Pod `curl` check, showing the HTTP status and Secret names without Secret values.
-
-Review changes before committing. Do not stage IDE directories such as `.idea/` or local credentials.
+Ensure the Pull Request includes `security/rbac.yml`, the updated Django Deployment manifest, the updated `bootstrap.sh`, this `INSTRUCTION.md`, and the screenshot of the successful in-Pod API request. Do not commit `.idea/`, local credentials, or cluster state.
 
 ```bash
 git status
@@ -156,4 +139,4 @@ git commit -m "Configure namespace-scoped RBAC for Django ServiceAccount"
 git push -u origin develop
 ```
 
-Open a Pull Request from `develop` to the repository's intended base branch, attach the screenshot, and submit the PR URL on the Mate Academy platform.
+If the changes have already been committed, make a new commit only for subsequent corrections. Open or update the PR from `develop` to the repository's intended base branch and attach the screenshot before submitting the PR URL on the Mate Academy platform.

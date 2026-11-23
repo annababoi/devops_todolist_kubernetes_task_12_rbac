@@ -29,8 +29,7 @@ kubectl apply -f .infrastructure/app/nodeport.yml
 kubectl apply -f .infrastructure/app/deployment.yml
 
 # Wait for Django
-kubectl rollout status deployment/todoapp \
-  -n todoapp --timeout=300s
+kubectl rollout status deployment/todoapp -n todoapp --timeout=300s
 
 # Verify resources
 kubectl get serviceaccounts -n todoapp
